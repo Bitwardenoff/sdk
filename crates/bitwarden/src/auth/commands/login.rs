@@ -24,7 +24,9 @@ use {
     crate::{
         auth::{
             api::request::{ApiTokenRequest, PasswordTokenRequest},
-            request::{ApiKeyLoginRequest, PasswordLoginRequest, SessionLoginRequest},
+            request::{
+                ApiKeyLoginRequest, PasswordLoginRequest, SessionLoginRequest, UnlockRequest,
+            },
             response::PasswordLoginResponse,
         },
         client::auth_settings::AuthSettings,
@@ -173,11 +175,8 @@ pub(crate) async fn access_token_login(
 
 #[cfg(feature = "internal")]
 pub(crate) async fn session_login(client: &mut Client, input: &SessionLoginRequest) -> Result<()> {
-    use crate::client::{keys::Keys, profile::Profile};
-
     client.state.load_account(input.user_id).await?;
 
-    let Some(profile) = Profile::get(client).await else {return Err(Error::NotAuthenticated)};
     let auth = Auth::get(client).await;
 
     let Some(expires) = auth.token_expiration else {return Err(Error::VaultLocked)};
@@ -193,6 +192,18 @@ pub(crate) async fn session_login(client: &mut Client, input: &SessionLoginReque
         )
         .await?;
 
+    Ok(())
+}
+
+#[cfg(feature = "internal")]
+pub(crate) async fn unlock(client: &mut Client, input: &UnlockRequest) -> Result<()> {
+    use crate::{
+        client::{keys::Keys, profile::Profile},
+        state::migrations,
+    };
+
+    let Some(profile) = Profile::get(client).await else {return Err(Error::NotAuthenticated)};
+
     let _ = determine_password_hash(client, &profile.email, &input.password).await?;
 
     let Some(keys) = Keys::get(client).await else {return Err(Error::VaultLocked)};
@@ -204,6 +215,8 @@ pub(crate) async fn session_login(client: &mut Client, input: &SessionLoginReque
     client
         .initialize_org_crypto(&keys.organization_keys)
         .await?;
+
+    migrations::run_migrations(&client).await?;
 
     Ok(())
 }

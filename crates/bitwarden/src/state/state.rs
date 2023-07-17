@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{client::client_settings::ClientSettings, error::Result};
 
 #[cfg(feature = "internal")]
-use crate::error::Error;
+use crate::{error::Error, Client};
 
 pub struct State {
     pub(crate) account: Mutex<StateStorage>,
@@ -33,37 +33,6 @@ impl State {
     }
 
     #[cfg(feature = "internal")]
-    pub(crate) async fn set_account_sync_data(
-        &self,
-        id: Uuid,
-        data: bitwarden_api_api::models::SyncResponseModel,
-    ) -> Result<()> {
-        // Before we create the storage profile, keep a copy of the current temporary storage (tokens, kdf params, etc)
-
-        use crate::client::{keys::store_keys_from_sync, profile::store_profile_from_sync};
-        let state = self.account.lock().await.get();
-
-        // Create the new account state, and load the temporary storage into it
-        let mut account = self.account.lock().await;
-        *account = StateStorage::new(id.to_string(), load_medium(&self.path));
-        account
-            .modify(|acc| {
-                *acc = Some(state);
-                Ok(())
-            })
-            .await?;
-        drop(account);
-
-        // Save the new data
-        let profile = data.profile.ok_or(Error::MissingFields)?;
-
-        store_keys_from_sync(profile.as_ref(), self).await?;
-        store_profile_from_sync(profile.as_ref(), self).await?;
-
-        Ok(())
-    }
-
-    #[cfg(feature = "internal")]
     pub(crate) async fn load_account(&self, id: Uuid) -> Result<()> {
         let mut account = self.account.lock().await;
         *account = StateStorage::new(id.to_string(), load_medium(&self.path));
@@ -72,8 +41,43 @@ impl State {
     }
 }
 
+#[cfg(feature = "internal")]
+pub(crate) async fn set_account_sync_data(
+    client: &Client,
+    id: Uuid,
+    data: bitwarden_api_api::models::SyncResponseModel,
+) -> Result<()> {
+    // Before we create the storage profile, keep a copy of the current temporary storage (tokens, kdf params, etc)
+
+    use crate::{
+        client::{keys::store_keys_from_sync, profile::store_profile_from_sync},
+        state::migrations::Migrations,
+    };
+    let state = client.state.account.lock().await.get();
+
+    // Create the new account state, and load the temporary storage into it
+    let mut account = client.state.account.lock().await;
+    *account = StateStorage::new(id.to_string(), load_medium(&client.state.path));
+    account
+        .modify(|acc| {
+            *acc = Some(state);
+            Ok(())
+        })
+        .await?;
+    drop(account);
+
+    // Save the new data
+    let profile = data.profile.ok_or(Error::MissingFields)?;
+
+    store_keys_from_sync(profile.as_ref(), client).await?;
+    store_profile_from_sync(profile.as_ref(), client).await?;
+
+    Migrations::set_version_latest_if_missing(client).await?;
+
+    Ok(())
+}
 pub struct StateStorage {
-    cache: HashMap<String, Value>,
+    cache: serde_json::Map<String, Value>,
     account_id: String,
     medium: Box<dyn StateStorageMedium>,
 }
@@ -81,18 +85,17 @@ pub struct StateStorage {
 impl StateStorage {
     fn new(account_id: String, medium: Box<dyn StateStorageMedium>) -> Self {
         Self {
-            cache: HashMap::new(),
+            cache: serde_json::Map::new(),
             account_id,
             medium,
         }
     }
-
-    pub fn get(&self) -> HashMap<String, Value> {
+    pub fn get(&self) -> serde_json::Map<String, Value> {
         self.cache.clone()
     }
 
     #[cfg(feature = "internal")]
-    pub async fn read(&mut self) -> Result<HashMap<String, Value>> {
+    pub async fn read(&mut self) -> Result<serde_json::Map<String, Value>> {
         let value = self
             .medium
             .read()
@@ -105,7 +108,7 @@ impl StateStorage {
 
     pub async fn modify<'b>(
         &mut self,
-        modify_fn: impl FnOnce(&mut Option<HashMap<String, Value>>) -> Result<()> + Send + 'b,
+        modify_fn: impl FnOnce(&mut Option<serde_json::Map<String, Value>>) -> Result<()> + Send + 'b,
     ) -> Result<()> {
         let account_id = self.account_id.clone();
 
@@ -142,7 +145,7 @@ fn load_medium(path: &Option<String>) -> Box<dyn StateStorageMedium> {
     }
 }
 
-type StateMap = HashMap<String, HashMap<String, Value>>;
+type StateMap = HashMap<String, serde_json::Map<String, Value>>;
 
 #[async_trait::async_trait]
 trait StateStorageMedium: Sync + Send + Debug {
