@@ -1,7 +1,4 @@
-use std::{
-    str::FromStr,
-    time::{Duration, Instant},
-};
+use std::str::FromStr;
 
 use base64::Engine;
 
@@ -13,6 +10,7 @@ use crate::{
     },
     client::{
         access_token::AccessToken,
+        auth::Auth,
         encryption_settings::{decrypt, SymmetricCryptoKey},
         Client, LoginMethod,
     },
@@ -26,7 +24,7 @@ use {
     crate::{
         auth::{
             api::request::{ApiTokenRequest, PasswordTokenRequest},
-            request::{ApiKeyLoginRequest, PasswordLoginRequest},
+            request::{ApiKeyLoginRequest, PasswordLoginRequest, UnlockRequest},
             response::PasswordLoginResponse,
         },
         client::auth_settings::AuthSettings,
@@ -50,19 +48,23 @@ pub(crate) async fn password_login(
     let response = request_identity_tokens(client, input, &password_hash).await?;
 
     if let IdentityTokenResponse::Authenticated(r) = &response {
-        client.set_tokens(
-            r.access_token.clone(),
-            r.refresh_token.clone(),
-            r.expires_in,
-            LoginMethod::Username {
-                client_id: "web".to_owned(),
-            },
-        );
+        client
+            .set_tokens(
+                r.access_token.clone(),
+                r.refresh_token.clone(),
+                r.expires_in,
+                LoginMethod::Username {
+                    client_id: "web".to_owned(),
+                },
+            )
+            .await?;
 
         let user_key = CipherString::from_str(r.key.as_deref().unwrap()).unwrap();
         let private_key = CipherString::from_str(r.private_key.as_deref().unwrap()).unwrap();
 
-        client.initialize_user_crypto(&input.password, user_key, private_key)?;
+        client
+            .initialize_user_crypto(&input.password, user_key, private_key)
+            .await?;
     }
 
     PasswordLoginResponse::process_response(response)
@@ -79,15 +81,17 @@ pub(crate) async fn api_key_login(
     let response = request_api_identity_tokens(client, input).await?;
 
     if let IdentityTokenResponse::Authenticated(r) = &response {
-        client.set_tokens(
-            r.access_token.clone(),
-            r.refresh_token.clone(),
-            r.expires_in,
-            LoginMethod::ApiKey {
-                client_id: input.client_id.to_owned(),
-                client_secret: input.client_secret.to_owned(),
-            },
-        );
+        client
+            .set_tokens(
+                r.access_token.clone(),
+                r.refresh_token.clone(),
+                r.expires_in,
+                LoginMethod::ApiKey {
+                    client_id: input.client_id.to_owned(),
+                    client_secret: input.client_secret.to_owned(),
+                },
+            )
+            .await?;
 
         let access_token_obj = decode_token(&r.access_token)?;
 
@@ -101,7 +105,9 @@ pub(crate) async fn api_key_login(
         let user_key = CipherString::from_str(r.key.as_deref().unwrap()).unwrap();
         let private_key = CipherString::from_str(r.private_key.as_deref().unwrap()).unwrap();
 
-        client.initialize_user_crypto(&input.password, user_key, private_key)?;
+        client
+            .initialize_user_crypto(&input.password, user_key, private_key)
+            .await?;
     }
 
     ApiKeyLoginResponse::process_response(response)
@@ -146,21 +152,48 @@ pub(crate) async fn access_token_login(
             .parse()
             .map_err(|_| Error::InvalidResponse)?;
 
-        client.set_tokens(
-            r.access_token.clone(),
-            r.refresh_token.clone(),
-            r.expires_in,
-            LoginMethod::AccessToken {
-                service_account_id: access_token.service_account_id,
-                client_secret: access_token.client_secret,
-                organization_id,
-            },
-        );
+        client
+            .set_tokens(
+                r.access_token.clone(),
+                r.refresh_token.clone(),
+                r.expires_in,
+                LoginMethod::AccessToken {
+                    service_account_id: access_token.service_account_id,
+                    client_secret: access_token.client_secret,
+                    organization_id,
+                },
+            )
+            .await?;
 
         client.initialize_crypto_single_key(encryption_key);
     }
 
     ApiKeyLoginResponse::process_response(response)
+}
+
+#[cfg(feature = "internal")]
+pub(crate) async fn unlock(client: &mut Client, input: &UnlockRequest) -> Result<()> {
+    use crate::client::{keys::Keys, profile::Profile};
+
+    client.state.load_account(input.user_id).await?;
+
+    let Some(profile) = Profile::get(client).await else {return Err(Error::NotAuthenticated)};
+    let auth = Auth::get(client).await;
+    client.set_access_token(auth.access_token);
+
+    let _ = determine_password_hash(client, &profile.email, &input.password).await?;
+
+    let Some(keys) = Keys::get(client).await else {return Err(Error::VaultLocked)};
+
+    client
+        .initialize_user_crypto(&input.password, keys.crypto_symmetric_key, keys.private_key)
+        .await?;
+
+    client
+        .initialize_org_crypto(&keys.organization_keys)
+        .await?;
+
+    Ok(())
 }
 
 #[cfg(feature = "internal")]
@@ -172,7 +205,7 @@ async fn determine_password_hash(
     let pre_login = request_prelogin(client, email.to_owned()).await?;
     let auth_settings = AuthSettings::new(pre_login, email.to_owned());
     let password_hash = auth_settings.make_user_password_hash(password)?;
-    client.set_auth_settings(auth_settings);
+    client.set_auth_settings(auth_settings).await?;
 
     Ok(password_hash)
 }
@@ -218,17 +251,19 @@ async fn request_access_token(
 }
 
 pub(crate) async fn renew_token(client: &mut Client) -> Result<()> {
-    const TOKEN_RENEW_MARGIN: Duration = Duration::from_secs(5 * 60);
+    let token_renew_margin = chrono::Duration::seconds(5 * 60);
 
-    if let (Some(expires), Some(login_method)) = (&client.token_expires_in, &client.login_method) {
-        if expires > &(Instant::now() + TOKEN_RENEW_MARGIN) {
+    let auth = Auth::get(client).await;
+
+    if let (Some(expires), Some(login_method)) = (&auth.token_expiration, &auth.login_method) {
+        if expires > &(chrono::Utc::now() + token_renew_margin) {
             return Ok(());
         }
 
         let res = match login_method {
             #[cfg(feature = "internal")]
             LoginMethod::Username { client_id } => {
-                let refresh = client
+                let refresh = auth
                     .refresh_token
                     .as_deref()
                     .ok_or(Error::NotAuthenticated)?;
@@ -263,12 +298,16 @@ pub(crate) async fn renew_token(client: &mut Client) -> Result<()> {
         match res {
             IdentityTokenResponse::Refreshed(r) => {
                 let login_method = login_method.to_owned();
-                client.set_tokens(r.access_token, r.refresh_token, r.expires_in, login_method);
+                client
+                    .set_tokens(r.access_token, r.refresh_token, r.expires_in, login_method)
+                    .await?;
                 return Ok(());
             }
             IdentityTokenResponse::Authenticated(r) => {
                 let login_method = login_method.to_owned();
-                client.set_tokens(r.access_token, r.refresh_token, r.expires_in, login_method);
+                client
+                    .set_tokens(r.access_token, r.refresh_token, r.expires_in, login_method)
+                    .await?;
                 return Ok(());
             }
             _ => {
