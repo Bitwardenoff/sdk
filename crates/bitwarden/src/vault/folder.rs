@@ -13,9 +13,9 @@ use crate::error::{Error, Result};
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "mobile", derive(uniffi::Record))]
 pub struct Folder {
-    id: Option<Uuid>,
-    name: EncString,
-    revision_date: DateTime<Utc>,
+    pub id: Option<Uuid>,
+    pub name: EncString,
+    pub revision_date: DateTime<Utc>,
 }
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
