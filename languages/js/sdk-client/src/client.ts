@@ -1,11 +1,14 @@
 import {
   Convert,
+  PasswordGeneratorRequest,
   ProjectResponse,
   ProjectsDeleteResponse,
   ProjectsResponse,
   SecretIdentifiersResponse,
   SecretResponse,
   SecretsDeleteResponse,
+  SecretsSyncResponse,
+  SecretsResponse,
 } from "./schemas";
 
 interface BitwardenSDKClient {
@@ -26,16 +29,8 @@ export class BitwardenClient {
     this.client = client;
   }
 
-  async accessTokenLogin(accessToken: string): Promise<void> {
-    const response = await this.client.run_command(
-      Convert.commandToJson({
-        accessTokenLogin: {
-          accessToken,
-        },
-      }),
-    );
-
-    handleResponse(Convert.toResponseForAccessTokenLoginResponse(response));
+  auth(): AuthClient {
+    return new AuthClient(this.client);
   }
 
   secrets(): SecretsClient {
@@ -44,6 +39,10 @@ export class BitwardenClient {
 
   projects(): ProjectsClient {
     return new ProjectsClient(this.client);
+  }
+
+  generators(): GeneratorsClient {
+    return new GeneratorsClient(this.client);
   }
 }
 
@@ -67,11 +66,11 @@ export class SecretsClient {
   }
 
   async create(
+    organizationId: string,
     key: string,
     value: string,
     note: string,
     projectIds: string[],
-    organizationId: string,
   ): Promise<SecretResponse> {
     const response = await this.client.run_command(
       Convert.commandToJson({
@@ -97,12 +96,12 @@ export class SecretsClient {
   }
 
   async update(
+    organizationId: string,
     id: string,
     key: string,
     value: string,
     note: string,
     projectIds: string[],
-    organizationId: string,
   ): Promise<SecretResponse> {
     const response = await this.client.run_command(
       Convert.commandToJson({
@@ -126,6 +125,30 @@ export class SecretsClient {
 
     return handleResponse(Convert.toResponseForSecretsDeleteResponse(response));
   }
+
+  async sync(organizationId: string, lastSyncedDate?: Date): Promise<SecretsSyncResponse> {
+    const response = await this.client.run_command(
+      Convert.commandToJson({
+        secrets: {
+          sync: { organizationId, lastSyncedDate },
+        },
+      }),
+    );
+
+    return handleResponse(Convert.toResponseForSecretsSyncResponse(response));
+  }
+
+  async getByIds(ids: string[]): Promise<SecretsResponse> {
+    const response = await this.client.run_command(
+      Convert.commandToJson({
+        secrets: {
+          getByIds: { ids },
+        },
+      }),
+    );
+
+    return handleResponse(Convert.toResponseForSecretsResponse(response));
+  }
 }
 
 export class ProjectsClient {
@@ -147,7 +170,7 @@ export class ProjectsClient {
     return handleResponse(Convert.toResponseForProjectResponse(response));
   }
 
-  async create(name: string, organizationId: string): Promise<ProjectResponse> {
+  async create(organizationId: string, name: string): Promise<ProjectResponse> {
     const response = await this.client.run_command(
       Convert.commandToJson({
         projects: {
@@ -171,7 +194,7 @@ export class ProjectsClient {
     return handleResponse(Convert.toResponseForProjectsResponse(response));
   }
 
-  async update(id: string, name: string, organizationId: string): Promise<ProjectResponse> {
+  async update(organizationId: string, id: string, name: string): Promise<ProjectResponse> {
     const response = await this.client.run_command(
       Convert.commandToJson({
         projects: {
@@ -193,5 +216,45 @@ export class ProjectsClient {
     );
 
     return handleResponse(Convert.toResponseForProjectsDeleteResponse(response));
+  }
+}
+
+export class GeneratorsClient {
+  client: BitwardenSDKClient;
+
+  constructor(client: BitwardenSDKClient) {
+    this.client = client;
+  }
+
+  async password(req: PasswordGeneratorRequest): Promise<string> {
+    const response = await this.client.run_command(
+      Convert.commandToJson({
+        generators: {
+          generatePassword: req,
+        },
+      }),
+    );
+
+    return handleResponse(Convert.toResponseForString(response));
+  }
+}
+
+export class AuthClient {
+  client: BitwardenSDKClient;
+
+  constructor(client: BitwardenSDKClient) {
+    this.client = client;
+  }
+
+  async loginAccessToken(accessToken: string): Promise<void> {
+    const response = await this.client.run_command(
+      Convert.commandToJson({
+        loginAccessToken: {
+          accessToken,
+        },
+      }),
+    );
+    
+    handleResponse(Convert.toResponseForAccessTokenLoginResponse(response));
   }
 }
